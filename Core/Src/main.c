@@ -74,6 +74,9 @@ typedef enum
 #define FLASH_ERASE_FAILED 0x02
 #define FLASH_TYPEPROGRAM_BYTE 0x00000000
 
+#define BL_RX_BUFFER_SIZE 512
+#define TIME_WAIT 50
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -84,15 +87,21 @@ typedef enum
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-unsigned char blRxBuffer[512] = {0};
-char pBuffer[512] = {0};
+unsigned char blRxBuffer[BL_RX_BUFFER_SIZE] = {0};
+// char pBuffer[512] = {0};
+uint8_t blRxByte;
+volatile uint16_t blRxArrIdx = 0;
+volatile uint32_t blLastRxTick = 0;
+volatile uint8_t blRxNewByteFlag = 0;
+volatile uint8_t blRxCompleteFlag = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
+/* USER CODE BEGIN PFP */
 void SystemClock_Config(void);
 void bootloader_handle_go_cmd(uint8_t *pBuffer);
 uint8_t execute_flash_erase(uint8_t sector_number, uint8_t number_of_sector);
-/* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
@@ -103,6 +112,49 @@ int _write(int file, char *ptr, int len)
   (void)file;
   HAL_UART_Transmit(&huart1, (uint8_t *)ptr, len, 1000);
   return len;
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART2)
+  {
+    if (blRxArrIdx < BL_RX_BUFFER_SIZE)
+    {
+      blRxBuffer[blRxArrIdx++] = blRxByte;
+
+      blRxNewByteFlag = 1;
+      blLastRxTick = HAL_GetTick();
+    }
+
+    HAL_UART_Receive_IT(&huart2, &blRxByte, 1);
+  }
+}
+
+void bootloader_uart_start_receive(void)
+{
+  blRxArrIdx = 0;
+  blRxNewByteFlag = 0;
+  blRxCompleteFlag = 0;
+
+  HAL_UART_Receive_IT(&huart2, &blRxByte, 1);
+}
+
+uint8_t bootloader_uart_check_rx(void)
+{
+  if (blRxNewByteFlag == 0)
+  {
+    return 0;
+  }
+
+  if (blRxCompleteFlag == 0)
+  {
+    if ((HAL_GetTick() - blLastRxTick) >= TIME_WAIT)
+    {
+      blRxCompleteFlag = 1;
+    }
+  }
+
+  return blRxCompleteFlag;
 }
 
 void jump_to_application(uint32_t address)
@@ -129,66 +181,43 @@ void jump_to_application(uint32_t address)
 
 void bootloader_uart_read_data(void)
 {
-  uint8_t rcv_len = 0;
+  bootloader_uart_start_receive();
 
   while (1)
   {
-    memset(blRxBuffer, 0, 200);
-    HAL_UART_Receive(&huart2, blRxBuffer, 1, HAL_MAX_DELAY);
-    rcv_len = blRxBuffer[0];
-    // printf("Len: %02X\r\n", rcv_len);
-
-    HAL_UART_Receive(&huart2, &blRxBuffer[1], rcv_len, HAL_MAX_DELAY);
-    trace_hex("Rx arr", blRxBuffer, rcv_len + 1);
-
-    switch (blRxBuffer[1])
+    if (bootloader_uart_check_rx())
     {
-    case BL_GET_VER:
-      bootloader_handle_getver_cmd(blRxBuffer);
-      break;
+      printf("BL_DEBUG: recieve complete\r\n");
 
-      // case BL_GET_HELP:
-      //   bootloader_handle_gethelp_cmd(blRxBuffer);
-      //   break;
+      trace_hex("Rx arr", blRxBuffer, blRxArrIdx);
 
-      // case BL_GET_CID:
-      //   bootloader_handle_getcid_cmd(blRxBuffer);
-      //   break;
+      switch (blRxBuffer[1])
+      {
+      case BL_GET_VER:
+        bootloader_handle_getver_cmd(blRxBuffer);
+        break;
 
-      // case BL_GET_RDP_STATUS:
-      //   bootloader_handle_getrdp_cmd(blRxBuffer);
-      //   break;
+      case BL_GO_TO_ADDR:
+        bootloader_handle_go_cmd(blRxBuffer);
+        break;
 
-    case BL_GO_TO_ADDR:
-      bootloader_handle_go_cmd(blRxBuffer);
-      break;
+      case BL_FLASH_ERASE:
+        bootloader_handle_flash_erase_cmd(blRxBuffer);
+        break;
 
-    case BL_FLASH_ERASE:
-      bootloader_handle_flash_erase_cmd(blRxBuffer);
-      break;
+      case BL_MEM_WRITE:
+        bootloader_handle_mem_write_cmd(blRxBuffer);
+        break;
 
-    case BL_MEM_WRITE:
-      bootloader_handle_mem_write_cmd(blRxBuffer);
-      break;
+      default:
+        break;
+      }
 
-      // case BL_EN_R_W_PROTECT:
-      //   bootloader_handle_endis_rw_protect(blRxBuffer);
-      //   break;
+      memset(blRxBuffer, 0, BL_RX_BUFFER_SIZE);
 
-      // case BL_MEM_READ:
-      //   bootloader_handle_mem_read(blRxBuffer);
-      //   break;
-
-      // case BL_READ_SECTOR_STATUS:
-      //   bootloader_handle_read_sector_status(blRxBuffer);
-      //   break;
-
-      // case BL_OTP_READ:
-      //   bootloader_handle_read_otp(blRxBuffer);
-      //   break;
-
-    default:
-      break;
+      blRxArrIdx = 0;
+      blRxNewByteFlag = 0;
+      blRxCompleteFlag = 0;
     }
   }
 }
